@@ -7,7 +7,7 @@ This folder contains sketches for Arduino (and compatible) boards. The example s
 
 **Arduino_LoRa_Simple_temp** illustrates how a simple LoRa device with temperature data can be flashed to an Arduino board. The example illustrates in a simple manner how to implement most of the features of a real IoT device: periodic sensing, transmission to gateway, duty-cycle and low-power mode to run on battery for months.
  
-**Arduino_LoRa_temp** illustrates a more complex example by adding custom Carrier Sense mechanism that you can easily change, AES encryption and the possibility to send LoRaWAN packet. It can serve as a template for a more complex LoRa IoT device.
+**Arduino_LoRa_temp** illustrates a more complex example with AES encryption and the possibility to send LoRaWAN packet. It can also open a receive window after every transmission to wait for downlink message coming from the gateway. The template shows for instance how an '/@Ax#' command can be parsed to set the node's address to 'x'. It can serve as a template for a more complex LoRa IoT device.
 
 **Arduino_LoRa_Generic_Sensor** is a very generic sensor template where a large variety of new physical sensors can be added. All physical sensors must be derived from a base Sensor class (defined in Sensor.cpp and Sensor.h) and should provide a get_value() and get_nomenclature() function. All the periodic task loop with duty-cycle low-power management is already there as in previous examples. Some predefined physical sensors are also already defined:
 
@@ -74,6 +74,8 @@ With the declared sensors, the transmitted data string can be as follows:
 You can look at the provided examples to see how you can write a specific sensor class for a specific physical sensor. The previous simple temperature example Arduino_LoRa_Simple_temp can be obtained from the generic example by simply using a single sensor declaration with the LM35 class (i.e. sensor_ptrs[0]).	
 
 **Arduino_LoRa_InteractiveDevice** is a tool that turns an Arduino board to an interactive device where a user can interactively enter data to be sent to the gateway. There are also many parameters that can dynamically be configured. This example can serve for test and debug purposes as well.
+
+**Arduino_LoRa_ucamII** is the image IoT sensor device for multimedia sensing. Read [this specific page](http://cpham.perso.univ-pau.fr/WSN-MODEL/tool-html/imagesensor.html) and this [specific tutorial](https://github.com/CongducPham/tutorials/blob/master/Low-cost-LoRa-ImageIoT-step-by-step.pdf) for more informations on how to build and run the image sensor.
 
 What Arduino boards are supported?
 ==================================
@@ -229,6 +231,21 @@ AES encryption can be enabled in Arduino_LoRa_temp and Arduino_LoRa_Generic_Sens
 	#define WITH_AES
 
 Please refer to the README file in the gw_advanced/aes_lorawan folder.
+
+Receive window
+--------------
+
+A receive window can be enabled in Arduino_LoRa_temp with the following define statement:
+	
+	#define WITH_RCVW
+	
+A receive window is opened after every transmission to wait for downlink message coming from the gateway. The template shows for instance how an '/@Ax#' command can be parsed to set the node's address to 'x'.	Note that the node's address can be saved in EEPROM so that a reset of the board will keep the new address. To do so, you have to comment the line:
+
+	//#define FORCE_DEFAULT_VALUE
+	
+For more information on dynamic configuration of end-device, please read carefully the information in the Arduino_LoRa_temp template.	
+	
+For more information on how to perform downlink transmission from the gateway, please refer to the following [README](https://github.com/CongducPham/LowCostLoRaGw/blob/master/gw_full_latest/README-downlink.md).
 
 LoRaWAN support
 ---------------

@@ -18,7 +18,8 @@
 # You should have received a copy of the GNU General Public License
 # along with the program.  If not, see <http://www.gnu.org/licenses/>.
 #
-# v3.0 - need to incorporate aux_radio features
+# v3.3 - image modification and need to incorporate aux_radio features
+# + copy post-processing feature
 #------------------------------------------------------------
 
 # IMPORTANT NOTE
@@ -43,8 +44,10 @@ import os
 import os.path
 import json
 import re
+import string
 import base64
 import requests
+import libSMS
 
 #////////////////////////////////////////////////////////////
 # ADD HERE VARIABLES FOR YOUR OWN NEEDS  
@@ -61,9 +64,7 @@ import requests
 # using the appkey to retrieve information such as encryption key,...
 
 app_key_list = [
-	#for testing
-	'****',
-	#change here your application key
+	#change/add here your application keys
 	'\x01\x02\x03\x04',
 	'\x05\x06\x07\x08' 
 ]
@@ -106,6 +107,12 @@ sf=0
 _hasRadioData=False
 #------------------------------------------------------------
 
+#to display non printable characters
+replchars = re.compile(r'[\x00-\x1f]')
+
+def replchars_to_hex(match):
+	return r'\x{0:02x}'.format(ord(match.group()))
+	
 #------------------------------------------------------------
 #will ignore lines beginning with '?'
 #------------------------------------------------------------
@@ -154,6 +161,9 @@ try:
 except KeyError:
 	_rawFormat = 0
 	
+if _rawFormat:
+	print "raw output from low-level gateway. post_processing_gw will handle packet format"	
+	
 #------------------------------------------------------------
 #local aes?
 #------------------------------------------------------------
@@ -162,13 +172,19 @@ try:
 except KeyError:
 	_local_aes = 0	
 	
+if _local_aes:
+	print "enable local AES decryption"	
+	
 #------------------------------------------------------------
 #with app key?
 #------------------------------------------------------------
 try:
 	_wappkey = json_array["gateway_conf"]["wappkey"]
 except KeyError:
-	_wappkey = 0		
+	_wappkey = 0	
+	
+if _wappkey:
+	print "will enforce app key"		
 
 #------------------------------------------------------------
 #initialize gateway DHT22 sensor
@@ -236,6 +252,38 @@ def dht22_target():
 		global _gw_dht22
 		time.sleep(_gw_dht22)
 
+
+#------------------------------------------------------------
+#copy post-processing.log into /var/www/html/admin/log folder
+#------------------------------------------------------------
+
+#you can enable periodic copy of post-processing.log file by setting to True
+#but you need to install the web admin interface in order to have the /var/www/html/admin/log/ folder
+_gw_copy_post_processing=False
+
+def copy_post_processing():
+	print "extract last 500 lines of post-processing_"+_gwid+".log into /var/www/html/admin/log/post-processing-500L.log"
+	cmd="sudo tail -n 500 log/post-processing_"+_gwid+".log > /var/www/html/admin/log/post-processing-500L.log"
+	
+	try:
+		os.system(cmd)
+	except:
+		print "Error when extracting lines from post-processing_"+_gwid+".log"
+		
+	cmd="sudo chown -R pi:www-data /var/www/html/admin/log"
+	
+	try:
+		os.system(cmd)
+	except:
+		print "Error when setting file ownership to pi:www-data"
+	
+
+def copy_post_processing_target():
+	while True:
+		copy_post_processing()
+		sys.stdout.flush()	
+		time.sleep(1800)
+	
 #------------------------------------------------------------
 #for downlink features
 #------------------------------------------------------------
@@ -403,8 +451,12 @@ def send_alert_mail(m):
 if _use_mail_alert :
 	print "post_processing_gw.py sends mail indicating that gateway has started post-processing stage..."
 	if checkNet():
-		send_alert_mail("Gateway "+_gwid+" has started post-processing stage")
-		print "Sending mail done"
+		try:
+			send_alert_mail("Gateway "+_gwid+" has started post-processing stage")
+			print "Sending mail done"
+		except:
+			print "Unexpected error when sending mail"
+				
 	sys.stdout.flush()		
 	
 #------------------------------------------------------------
@@ -479,12 +531,14 @@ def image_timeout():
 	f.close()
 	del fileH[node_id]
 	print "decoding image "+os.path.expanduser(imageFilenameA[node_id])
+	sys.stdout.flush()
 	
 	cmd = '/home/pi/lora_gateway/ucam-images/decode_to_bmp -received '+os.path.expanduser(imageFilenameA[node_id])+\
 		' -SN '+str(imgsnA[node_id])+\
 		' -src '+str(node_id)+\
 		' -camid '+str(camidA[node_id])+\
 		' -Q '+str(qualityA[node_id])+\
+		' -vflip'+\
 		' /home/pi/lora_gateway/ucam-images/128x128-test.bmp'
 	
 	print "decoding with command"
@@ -492,21 +546,32 @@ def image_timeout():
 	args = cmd.split()
 
 	out = 'error'
-	
+		
 	try:
 		out = subprocess.check_output(args, stderr=None, shell=False)
 		
 		if (out=='error'):
 			print "decoding error"
 		else:
-			print "producing file " + out 
-			print "moving decoded image file into " + os.path.expanduser(_folder_path+"images")
-			os.rename(out, os.path.expanduser(_folder_path+"images/"+out))  
+        	# leave enough time for the decoding program to terminate
+			time.sleep(3)
+			out = out.replace('\r','')
+			out = out.replace('\n','')
+			print "producing file " + out
+			print "creating if needed the uploads/node_"+str(node_id)+" folder"
+			try:
+				os.mkdir(os.path.expanduser(_web_folder_path+"images/uploads/node_"+str(node_id)))
+			except OSError:
+				print "folder already exist"				 	 
+			print "moving decoded image file into " + os.path.expanduser(_web_folder_path+"images/uploads/node_"+str(node_id))
+			os.rename(os.path.expanduser("./"+out), os.path.expanduser(_web_folder_path+"images/uploads/node_"+str(node_id)+"/"+out))
 			print "done"	
 
 	except subprocess.CalledProcessError:
 		print "launching image decoding failed!"
-
+		
+	sys.stdout.flush()
+	
 #------------------------------------------------------------
 #for managing the input data when we can have aes encryption
 #------------------------------------------------------------
@@ -553,6 +618,7 @@ def fillLinebuf(n):
 # CHANGE HERE THE VARIOUS PATHS FOR YOUR LOG FILES
 #////////////////////////////////////////////////////////////
 _folder_path = "/home/pi/Dropbox/LoRa-test/"
+_web_folder_path = "/var/www/html/"
 _telemetrylog_filename = _folder_path+"telemetry_"+str(_gwid)+".log"
 _imagelog_filename = _folder_path+"image_"+str(_gwid)+".log"
 
@@ -645,6 +711,16 @@ if (_gw_status):
 	t_status.daemon = True
 	t_status.start()
 	time.sleep(1)	
+	
+#copy post_processing feature
+	
+if (_gw_copy_post_processing):
+	print "Starting thread to copy post_processing.log"
+	sys.stdout.flush()
+	t_status = threading.Thread(target=copy_post_processing_target)
+	t_status.daemon = True
+	t_status.start()
+	time.sleep(1)
 
 print ''	
 print "Current working directory: "+os.getcwd()
@@ -744,8 +820,12 @@ while True:
 			#
 			for downlink_request in pending_downlink_requests:
 				request_json=json.loads(downlink_request)
-				if src == request_json["dst"]:
+				if (request_json["dst"]==0) or (src == request_json["dst"]):
 					print "post downlink: receive from %d with pending request" % src
+					if (request_json["dst"]==0):
+						print "in broadcast mode"
+					else:
+						print "in unicast mode"	
 					print "post downlink: downlink data is \"%s\"" % request_json["data"]
 					print "post downlink: generate "+_gw_downlink_file
 					print downlink_request
@@ -897,6 +977,12 @@ while True:
 			#the data prefix is inserted by the gateway
 			#do not modify, unless you know what you are doing and that you modify lora_gateway (comment WITH_DATA_PREFIX)
 			print "--> got data prefix"
+			
+			#if SNR < -20:
+			#	print "--> SNR too low, discarding data"
+			#	sys.stdin.readline()
+			#	continue	
+							
 			_hasRadioData=True
 			
 			#we actually need to use DATA_PREFIX in order to differentiate data from radio coming to the post-processing stage
@@ -951,12 +1037,26 @@ while True:
 						#print [hex(x) for x in lorapkt]
 						
 						from loraWAN import loraWAN_process_pkt
-						plain_payload=loraWAN_process_pkt(lorapkt)
+						try:
+							plain_payload=loraWAN_process_pkt(lorapkt)
+						except:
+							print "### unexpected decryption error ###"
+							plain_payload="###BADMIC###"
 						
 						if plain_payload=="###BADMIC###":
 							print plain_payload
 						else:	
-							print "plain payload is : "+plain_payload
+							print "plain payload is : ",
+							print(replchars.sub(replchars_to_hex, plain_payload))
+							#if ((ptype & PKT_FLAG_DATA_WAPPKEY)==PKT_FLAG_DATA_WAPPKEY):
+							#	the_app_key = plain_payload[0]
+							#	the_app_key = the_app_key + plain_payload[1]
+							#	the_app_key = the_app_key + plain_payload[2]
+							#	the_app_key = the_app_key + plain_payload[3]
+							#	print " ".join("0x{:02x}".format(ord(c)) for c in the_app_key),
+							#	print plain_payload[APPKEY_SIZE:] 
+							#else:
+							#	print plain_payload
 							_linebuf = plain_payload
 							_has_linebuf=1
 							_hasClearData=1
@@ -975,15 +1075,23 @@ while True:
 							#
 							for cloud_index in range(0,len(_cloud_for_lorawan_encrypted_data)):
 								
-								print "--> LoRaWAN encrypted cloud[%d]" % cloud_index
-								cloud_script=_cloud_for_lorawan_encrypted_data[cloud_index]
-								print "uploading with "+cloud_script
-								sys.stdout.flush()
-								cmd_arg=cloud_script+" \""+lorapktstr_b64.replace('\n','')+"\""+" \""+pdata.replace('\n','')+"\""+" \""+rdata.replace('\n','')+"\""+" \""+tdata.replace('\n','')+"\""+" \""+_gwid.replace('\n','')+"\""
-								print cmd_arg
-								os.system(cmd_arg) 
-							print "--> LoRaWAN encrypted cloud end"					
-						
+								try:
+									print "--> LoRaWAN encrypted cloud[%d]" % cloud_index
+									cloud_script=_cloud_for_lorawan_encrypted_data[cloud_index]
+									print "uploading with "+cloud_script
+									sys.stdout.flush()
+									cmd_arg=cloud_script+" \""+lorapktstr_b64.replace('\n','')+"\""+" \""+pdata.replace('\n','')+"\""+" \""+rdata.replace('\n','')+"\""+" \""+tdata.replace('\n','')+"\""+" \""+_gwid.replace('\n','')+"\""
+								except UnicodeDecodeError, ude:
+									print ude
+								else:
+									print cmd_arg
+									try:
+										os.system(cmd_arg)
+									except:
+										print "Error when uploading data to LoRaWAN encrypted cloud"								
+								
+							print "--> LoRaWAN encrypted cloud end"		
+							
 					continue	
 					
 			else:								
@@ -1005,12 +1113,27 @@ while True:
 							lorapkt.append(ord(lorapktstr[i]))
 						
 						from loraWAN import loraWAN_process_pkt
-						plain_payload=loraWAN_process_pkt(lorapkt)
+						try:
+							plain_payload=loraWAN_process_pkt(lorapkt)
+						except:
+							print "### unexpected decryption error ###"
+							plain_payload="###BADMIC###"
 						
 						if plain_payload=="###BADMIC###":
 							print plain_payload
 						else:	
-							print "plain payload is : "+plain_payload
+							print "plain payload is : ",
+							print(replchars.sub(replchars_to_hex, plain_payload))
+							
+							#if ((ptype & PKT_FLAG_DATA_WAPPKEY)==PKT_FLAG_DATA_WAPPKEY):
+							#	the_app_key = plain_payload[0]
+							#	the_app_key = the_app_key + plain_payload[1]
+							#	the_app_key = the_app_key + plain_payload[2]
+							#	the_app_key = the_app_key + plain_payload[3]
+							#	print " ".join("0x{:02x}".format(ord(c)) for c in the_app_key),
+							#	print plain_payload[APPKEY_SIZE:] 
+							#else:
+							#	print plain_payload
 							_linebuf = plain_payload
 							_has_linebuf=1
 							_hasClearData=1						
@@ -1033,13 +1156,21 @@ while True:
 							#							
 							for cloud_index in range(0,len(_cloud_for_encrypted_data)):
 								
-								print "--> encrypted cloud[%d]" % cloud_index
-								cloud_script=_cloud_for_encrypted_data[cloud_index]
-								print "uploading with "+cloud_script
-								sys.stdout.flush()
-								cmd_arg=cloud_script+" \""+lorapktstr_b64.replace('\n','')+"\""+" \""+pdata.replace('\n','')+"\""+" \""+rdata.replace('\n','')+"\""+" \""+tdata.replace('\n','')+"\""+" \""+_gwid.replace('\n','')+"\""
-								print cmd_arg
-								os.system(cmd_arg) 
+								try:
+									print "--> encrypted cloud[%d]" % cloud_index
+									cloud_script=_cloud_for_encrypted_data[cloud_index]
+									print "uploading with "+cloud_script
+									sys.stdout.flush()
+									cmd_arg=cloud_script+" \""+lorapktstr_b64.replace('\n','')+"\""+" \""+pdata.replace('\n','')+"\""+" \""+rdata.replace('\n','')+"\""+" \""+tdata.replace('\n','')+"\""+" \""+_gwid.replace('\n','')+"\""
+								except UnicodeDecodeError, ude:
+									print ude
+								else:
+									print cmd_arg
+									try:
+										os.system(cmd_arg)
+									except:
+										print "Error when uploading data to encrypted cloud"
+											
 							print "--> encrypted cloud end"	
 			else:
 				_hasClearData=1
@@ -1095,7 +1226,7 @@ while True:
 			else:
 				#new image packet from this node
 				nodeL.append(src_addr)
-				filename =(_folder_path+"images/ucam_%d-node#%.4d-cam#%d-Q%d.dat" % (imgSN,src_addr,cam_id,Q))
+				filename =(_folder_path+"images/ucam_%d-node_%.4d-cam_%d-Q%d.dat" % (imgSN,src_addr,cam_id,Q))
 				print "first pkt from node %d" % src_addr
 				print "creating file %s" % filename
 				theFile=open(os.path.expanduser(filename),"w")
@@ -1107,7 +1238,7 @@ while True:
 				qualityA.update({src_addr:Q})
 				camidA.update({src_addr:cam_id})
 				imgSN=imgSN+1
-				t = Timer(60, image_timeout)
+				t = Timer(90, image_timeout)
 				t.start()
 				#log only the first packet and the filename
 				f=open(os.path.expanduser(_imagelog_filename),"a")

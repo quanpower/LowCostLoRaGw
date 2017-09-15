@@ -36,6 +36,7 @@
 #include "DS18B20.h"
 #include "rawAnalog.h"
 #include "HCSR04.h"
+#include "HRLV.h"
 
 // IMPORTANT
 ///////////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -63,8 +64,6 @@
 // previous way for setting output power
 // 'H' is actually 6dBm, so better to use the new way to set output power
 // char powerLevel='H';
-#elif defined FCC_US_REGULATION
-#define MAX_DBM 14
 #endif
 
 #ifdef BAND868
@@ -98,17 +97,39 @@ const uint32_t DEFAULT_CHANNEL=CH_00_433;
 #define LOW_POWER
 #define LOW_POWER_HIBERNATE
 //#define WITH_ACK
+//this will enable a receive window after every transmission
+//#define WITH_RCVW
 ///////////////////////////////////////////////////////////////////
 
 ///////////////////////////////////////////////////////////////////
 // CHANGE HERE THE LORA MODE, NODE ADDRESS 
 #define LORAMODE  1
-#define node_addr 13
+uint8_t node_addr=13;
 //////////////////////////////////////////////////////////////////
 
 ///////////////////////////////////////////////////////////////////
 // CHANGE HERE THE TIME IN MINUTES BETWEEN 2 READING & TRANSMISSION
 unsigned int idlePeriodInMin = 10;
+///////////////////////////////////////////////////////////////////
+
+///////////////////////////////////////////////////////////////////
+// COMMENT THIS LINE IF YOU WANT TO DYNAMICALLY SET THE NODE'S ADDR 
+// OR SOME OTHER PARAMETERS BY REMOTE RADIO COMMANDS (WITH_RCVW)
+// LEAVE THIS LINE UNCOMMENTED IF YOU WANT TO USE THE DEFAULT VALUE
+// AND CONFIGURE YOUR DEVICE BY CHANGING MANUALLY THESE VALUES IN 
+// THE SKETCH.
+//
+// ONCE YOU HAVE FLASHED A BOARD WITHOUT FORCE_DEFAULT_VALUE, YOU 
+// WILL BE ABLE TO DYNAMICALLY CONFIGURE IT AND SAVE THIS CONFIGU-
+// RATION INTO EEPROM. ON RESET, THE BOARD WILL USE THE SAVED CON-
+// FIGURATION.
+
+// IF YOU WANT TO REINITIALIZE A BOARD, YOU HAVE TO FIRST FLASH IT 
+// WITH FORCE_DEFAULT_VALUE, WAIT FOR ABOUT 10s SO THAT IT CAN BOOT
+// AND FLASH IT AGAIN WITHOUT FORCE_DEFAULT_VALUE. THE BOARD WILL 
+// THEN USE THE DEFAULT CONFIGURATION UNTIL NEXT CONFIGURATION.
+
+#define FORCE_DEFAULT_VALUE
 ///////////////////////////////////////////////////////////////////
 
 #ifdef WITH_APPKEY
@@ -178,16 +199,47 @@ struct sx1272config {
   uint8_t flag1;
   uint8_t flag2;
   uint8_t seq;
+  uint8_t addr;  
+  unsigned int idle_period;  
+  uint8_t overwrite;
   // can add other fields such as LoRa mode,...
 };
 
 sx1272config my_sx1272config;
 #endif
 
+#ifdef WITH_RCVW
+
+// will wait for 5s before opening the rcv window
+#define DELAY_BEFORE_RCVW 5000
+
+long getCmdValue(int &i, char* strBuff=NULL) {
+  
+    char seqStr[7]="******";
+    
+    int j=0;
+    // character '#' will indicate end of cmd value
+    while ((char)message[i]!='#' && (i < strlen((char*)message)) && j<strlen(seqStr)) {
+            seqStr[j]=(char)message[i];
+            i++;
+            j++;
+    }
+    
+    // put the null character at the end
+    seqStr[j]='\0';
+    
+    if (strBuff) {
+            strcpy(strBuff, seqStr);        
+    }
+    else
+            return (atol(seqStr));
+}   
+#endif
+
 // SENSORS DEFINITION 
 //////////////////////////////////////////////////////////////////
 // CHANGE HERE THE NUMBER OF SENSORS, SOME CAN BE NOT CONNECTED
-const int number_of_sensors = 7;
+const int number_of_sensors = 8;
 //////////////////////////////////////////////////////////////////
 
 // array containing sensors pointers
@@ -230,13 +282,14 @@ void setup()
   sensor_ptrs[1] = new DHT22_Temperature("TC", IS_NOT_ANALOG, IS_CONNECTED, low_power_status, (uint8_t) 3, (uint8_t) 9);
   sensor_ptrs[2] = new DHT22_Humidity("HU", IS_NOT_ANALOG, IS_CONNECTED, low_power_status, (uint8_t) 3, (uint8_t) 9);
   sensor_ptrs[3] = new LeafWetness("lw", IS_ANALOG, IS_NOT_CONNECTED, low_power_status, (uint8_t) A2, (uint8_t) 7);
-  sensor_ptrs[4] = new DS18B20("DS", IS_NOT_ANALOG, IS_NOT_CONNECTED, low_power_status, (uint8_t) 4, (uint8_t) 7);
+  sensor_ptrs[4] = new DS18B20("DS", IS_NOT_ANALOG, IS_CONNECTED, low_power_status, (uint8_t) 4, (uint8_t) 7);
   sensor_ptrs[5] = new rawAnalog("SH", IS_ANALOG, IS_CONNECTED, low_power_status, (uint8_t) A1, (uint8_t) 6);
   sensor_ptrs[6] = new HCSR04("DIS", IS_NOT_ANALOG, IS_CONNECTED, low_power_status, (uint8_t) 39, (uint8_t) 41, (uint8_t) 40);
-
+  sensor_ptrs[7] = new HRLV("DIS_", IS_ANALOG, IS_NOT_CONNECTED, low_power_status, (uint8_t) A3, (uint8_t) 5);
+  
   // for non connected sensors, indicate whether you want some fake data, for test purposes for instance
   sensor_ptrs[3]->set_fake_data(true);
-  sensor_ptrs[4]->set_fake_data(true); 
+  //sensor_ptrs[4]->set_fake_data(true); 
 
 //////////////////////////////////////////////////////////////////  
 
@@ -282,7 +335,7 @@ void setup()
   EEPROM.get(0, my_sx1272config);
 
   // found a valid config?
-  if (my_sx1272config.flag1==0x12 && my_sx1272config.flag2==0x34) {
+  if (my_sx1272config.flag1==0x12 && my_sx1272config.flag2==0x35) {
     PRINT_CSTSTR("%s","Get back previous sx1272 config\n");
 
     // set sequence number for SX1272 library
@@ -290,12 +343,55 @@ void setup()
     PRINT_CSTSTR("%s","Using packet sequence number of ");
     PRINT_VALUE("%d", sx1272._packetNumber);
     PRINTLN;
+
+#ifdef FORCE_DEFAULT_VALUE
+    PRINT_CSTSTR("%s","Forced to use default parameters\n");
+    my_sx1272config.flag1=0x12;
+    my_sx1272config.flag2=0x35;
+    my_sx1272config.seq=sx1272._packetNumber;
+    my_sx1272config.addr=node_addr;
+    my_sx1272config.idle_period=idlePeriodInMin;    
+    my_sx1272config.overwrite=0;
+    EEPROM.put(0, my_sx1272config);
+#else
+    // get back the node_addr
+    if (my_sx1272config.addr!=0 && my_sx1272config.overwrite==1) {
+      
+        PRINT_CSTSTR("%s","Used stored address\n");
+        node_addr=my_sx1272config.addr;        
+    }
+    else
+        PRINT_CSTSTR("%s","Stored node addr is null\n"); 
+
+    // get back the idle period
+    if (my_sx1272config.idle_period!=0 && my_sx1272config.overwrite==1) {
+      
+        PRINT_CSTSTR("%s","Used stored idle period\n");
+        idlePeriodInMin=my_sx1272config.idle_period;        
+    }
+    else
+        PRINT_CSTSTR("%s","Stored idle period is null\n");                 
+#endif  
+
+#ifdef WITH_AES
+    DevAddr[3] = (unsigned char)node_addr;
+#endif            
+    PRINT_CSTSTR("%s","Using node addr of ");
+    PRINT_VALUE("%d", node_addr);
+    PRINTLN;   
+
+    PRINT_CSTSTR("%s","Using idle period of ");
+    PRINT_VALUE("%d", idlePeriodInMin);
+    PRINTLN;     
   }
   else {
     // otherwise, write config and start over
     my_sx1272config.flag1=0x12;
-    my_sx1272config.flag2=0x34;
+    my_sx1272config.flag2=0x35;
     my_sx1272config.seq=sx1272._packetNumber;
+    my_sx1272config.addr=node_addr;
+    my_sx1272config.idle_period=idlePeriodInMin;
+    my_sx1272config.overwrite=0;
   }
 #endif
   
@@ -409,9 +505,17 @@ void loop(void)
       
       startSend=millis();
 
-      // indicate that we have an appkey
-      sx1272.setPacketType(PKT_TYPE_DATA | PKT_FLAG_DATA_WAPPKEY);
+      uint8_t p_type=PKT_TYPE_DATA;
       
+#ifdef WITH_APPKEY
+      // indicate that we have an appkey
+      p_type = p_type | PKT_FLAG_DATA_WAPPKEY;
+#endif
+
+      sx1272.setPacketType(p_type);
+      
+      // Send message to the gateway and print the result
+      // with the app key if this feature is enabled
 #ifdef WITH_ACK
       int n_retry=NB_RETRIES;
       
@@ -456,6 +560,138 @@ void loop(void)
       PRINT_CSTSTR("%s","Packet sent, state ");
       PRINT_VALUE("%d", e);
       PRINTLN;
+
+#ifdef WITH_RCVW
+      PRINT_CSTSTR("%s","Wait for ");
+      PRINT_VALUE("%d", DELAY_BEFORE_RCVW-1000);
+      PRINTLN;
+      //wait a bit
+      delay(DELAY_BEFORE_RCVW-1000);
+
+      PRINT_CSTSTR("%s","Wait for incoming packet\n");
+      // wait for incoming packets
+      e = sx1272.receivePacketTimeout(10000);
+    
+      if (!e) {
+         int i=0;
+         int cmdValue;
+         uint8_t tmp_length;
+
+         sx1272.getSNR();
+         sx1272.getRSSIpacket();
+         
+         tmp_length=sx1272._payloadlength;
+
+         sprintf((char*)message, "^p%d,%d,%d,%d,%d,%d,%d\n",
+                   sx1272.packet_received.dst,
+                   sx1272.packet_received.type,                   
+                   sx1272.packet_received.src,
+                   sx1272.packet_received.packnum, 
+                   tmp_length,
+                   sx1272._SNR,
+                   sx1272._RSSIpacket);
+                                   
+         PRINT_STR("%s",(char*)message);         
+         
+         for ( ; i<tmp_length; i++) {
+           PRINT_STR("%c",(char)sx1272.packet_received.data[i]);
+           
+           message[i]=(char)sx1272.packet_received.data[i];
+         }
+         
+         message[i]=(char)'\0';    
+         PRINTLN;
+         FLUSHOUTPUT;   
+
+        i=0;
+
+        // commands have following format /@A6#
+        //
+        if (message[i]=='/' && message[i+1]=='@') {
+    
+            PRINT_CSTSTR("%s","Parsing command\n");      
+            i=i+2;   
+
+            switch ((char)message[i]) {
+
+                  // set the node's address, /@A10# to set the address to 10 for instance
+                  case 'A': 
+
+                      i++;
+                      cmdValue=getCmdValue(i);
+                      
+                      // cannot set addr greater than 255
+                      if (cmdValue > 255)
+                              cmdValue = 255;
+                      // cannot set addr lower than 2 since 0 is broadcast and 1 is for gateway
+                      if (cmdValue < 2)
+                              cmdValue = node_addr;
+                      // set node addr        
+                      node_addr=cmdValue; 
+#ifdef WITH_AES
+                      DevAddr[3] = (unsigned char)node_addr;
+#endif
+                      
+                      PRINT_CSTSTR("%s","Set LoRa node addr to ");
+                      PRINT_VALUE("%d", node_addr);  
+                      PRINTLN;
+                      // Set the node address and print the result
+                      e = sx1272.setNodeAddress(node_addr);
+                      PRINT_CSTSTR("%s","Setting LoRa node addr: state ");
+                      PRINT_VALUE("%d",e);     
+                      PRINTLN;           
+
+#ifdef WITH_EEPROM
+                      // save new node_addr in case of reboot
+                      my_sx1272config.addr=node_addr;
+                      my_sx1272config.overwrite=1;
+                      EEPROM.put(0, my_sx1272config);
+#endif
+
+                      break;        
+
+                  // set the time between 2 transmissions, /@I10# to set to 10 minutes for instance
+                  case 'I': 
+
+                      i++;
+                      cmdValue=getCmdValue(i);
+
+                      // cannot set addr lower than 1 minute
+                      if (cmdValue < 1)
+                              cmdValue = idlePeriodInMin;
+                      // idlePeriodInMin      
+                      idlePeriodInMin=cmdValue; 
+                      
+                      PRINT_CSTSTR("%s","Set duty-cycle to ");
+                      PRINT_VALUE("%d", idlePeriodInMin);  
+                      PRINTLN;         
+
+#ifdef WITH_EEPROM
+                      // save new node_addr in case of reboot
+                      my_sx1272config.idle_period=idlePeriodInMin;
+                      my_sx1272config.overwrite=1;
+                      EEPROM.put(0, my_sx1272config);
+#endif
+
+                      break;  
+                            
+                  /////////////////////////////////////////////////////////////////////////////////////////////////////////////
+                  // add here new commands
+                  //  
+
+                  //
+                  /////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+                  default:
+      
+                    PRINT_CSTSTR("%s","Unrecognized cmd\n");       
+                    break;
+            }
+        }          
+      }
+      else
+        PRINT_CSTSTR("%s","No packet\n");
+#endif
 
 #ifdef LOW_POWER
       PRINT_CSTSTR("%s","Switch to power saving mode\n");
@@ -537,6 +773,4 @@ void loop(void)
       PRINTLN;
   }
 #endif
-
-  delay(50);
 }
